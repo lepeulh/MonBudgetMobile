@@ -1,0 +1,29 @@
+import { createContext, useContext, useEffect, useState } from 'react';
+import { Session } from '@supabase/supabase-js';
+import { supabase } from '@/lib/supabase';
+
+type AuthContextType = { session: Session | null; chargement: boolean; };
+
+const AuthContext = createContext<AuthContextType>({ session: null, chargement: true });
+
+export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const [session, setSession] = useState<Session | null>(null);
+  const [chargement, setChargement] = useState(true);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setChargement(false);
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_e, s) => setSession(s));
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  return (
+    <AuthContext.Provider value={{ session, chargement }}>
+      {children}
+    </AuthContext.Provider>
+  );
+}
+
+export function useAuth() { return useContext(AuthContext); }

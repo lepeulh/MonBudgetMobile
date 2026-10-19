@@ -1,192 +1,160 @@
-import { ThemedText } from "@/components/themed-text";
-import { ThemedView } from "@/components/themed-view";
-import { Spacing } from "@/constants/theme";
-import { ScrollView, StyleSheet, TouchableOpacity, View } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import React, { useState, useEffect } from 'react';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert } from 'react-native';
+import { supabase } from '@/lib/supabase';
+import { Indicateurs } from '@/components/tableau_de_bord/indicateurs';
+import { Historique } from '@/components/tableau_de_bord/historique';
 
-// ── Données de test (on les remplacera par de vraies données plus tard) ──
-const COMPTES = [
-  { nom: "BNP", solde: 10, type: "Courant" },
-  { nom: "Bourso+", solde: 248, type: "Courant" },
-  { nom: "Boursorama", solde: -70, type: "Courant" },
-  { nom: "Test Épargne", solde: 700, type: "Épargne" },
-];
+type OngletPrincipal = 'INDICATEURS' | 'HISTORIQUE' | 'SIMULATION';
 
-const SOLDE_TOTAL = COMPTES.reduce((sum, c) => sum + c.solde, 0);
+export default function TableauDeBordScreen() {
+  const [ongletActif, setOngletActif] = useState<OngletPrincipal>('INDICATEURS');
+  const [loading, setLoading] = useState(true);
+  
+  const [comptes, setComptes] = useState<any[]>([]);
+  const [transactions, setTransactions] = useState<any[]>([]);
+  const [categories, setCategories] = useState<any[]>([]);
+  const [sousCategories, setSousCategories] = useState<any[]>([]);
 
-const MOIS_COURANT = "Mai 2026";
+  useEffect(() => {
+    chargerDonnees();
+  }, []);
 
-// ── Composant carte de compte ────────────────────────────────────────────────
-function CarteCompte({
-  nom,
-  solde,
-  type,
-}: {
-  nom: string;
-  solde: number;
-  type: string;
-}) {
-  const positif = solde >= 0;
+  async function chargerDonnees() {
+    setLoading(true);
+    try {
+      const [resComptes, resTx, resCat, resSousCat] = await Promise.all([
+        supabase.from('comptes').select('*').eq('actif', true),
+        supabase.from('transactions').select('*').order('date_operation', { ascending: false }),
+        supabase.from('categories').select('*'),
+        supabase.from('sous_categories').select('*')
+      ]);
+
+      setComptes(resComptes.data || []);
+      setTransactions(resTx.data || []);
+      setCategories(resCat.data || []);
+      setSousCategories(resSousCat.data || []);
+    } catch (error: any) {
+      Alert.alert('Erreur', 'Impossible de charger le tableau de bord.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // --- LOGIQUE DE MODIFICATION ---
+  const handleEditTransaction = async (txModifiee: any) => {
+    try {
+      const { error } = await supabase
+        .from('transactions')
+        .update({
+          date_operation: txModifiee.date_operation,
+          libelle: txModifiee.libelle,
+          montant: Math.abs(Number(txModifiee.montant)),
+          compte_id: txModifiee.compte_id
+        })
+        .eq('id', txModifiee.id);
+
+      if (error) throw error;
+      Alert.alert('Succès', 'Transaction modifiée.');
+      chargerDonnees();
+    } catch (error: any) {
+      Alert.alert('Erreur', error.message);
+    }
+  };
+
+  // --- LOGIQUE DE SUPPRESSION ET RÉTRO-PLANIFICATION ---
+  const handleDeleteTransaction = async (tx: any) => {
+    try {
+      // 1. Supprimer la transaction (ou les deux si c'est un transfert lié par groupe_id)
+      if (tx.type_operation === 'TRANSFERT' && tx.groupe_id) {
+        await supabase.from('transactions').delete().eq('groupe_id', tx.groupe_id);
+      } else {
+        await supabase.from('transactions').delete().eq('id', tx.id);
+      }
+
+      // 2. Règle métier : Si c'était issu d'une planification, on la remet "A_FAIRE"
+      // Note: Assurez-vous d'avoir une colonne 'occurrence_id' dans votre table transactions
+      if (tx.occurrence_id) {
+        await supabase
+          .from('occurrences_planifiees')
+          .update({ statut: 'A_FAIRE' })
+          .eq('id', tx.occurrence_id);
+      }
+
+      Alert.alert('Succès', 'Transaction supprimée.');
+      chargerDonnees();
+    } catch (error: any) {
+      Alert.alert('Erreur', error.message);
+    }
+  };
+
   return (
-    <ThemedView type="backgroundElement" style={styles.carteCompte}>
-      <ThemedText type="small" style={styles.compteType}>
-        {type}
-      </ThemedText>
-      <ThemedText type="defaultSemiBold">{nom}</ThemedText>
-      <ThemedText
-        type="defaultSemiBold"
-        style={[
-          styles.soldeMontant,
-          { color: positif ? "#10b981" : "#ef4444" },
-        ]}
-      >
-        {positif ? "+" : ""}
-        {solde.toLocaleString("fr-FR", { minimumFractionDigits: 2 })} €
-      </ThemedText>
-    </ThemedView>
+    <ScrollView style={styles.container} contentContainerStyle={styles.scrollContent}>
+      
+      <View style={styles.header}>
+        <Text style={styles.pageTitle}>Tableau de bord</Text>
+        <Text style={styles.indication}>Données au {new Date().toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' })}</Text>
+      </View>
+
+      <View style={styles.navPrincipale}>
+        <TouchableOpacity style={[styles.navBtn, ongletActif === 'INDICATEURS' && styles.navBtnActif]} onPress={() => setOngletActif('INDICATEURS')}>
+          <Text style={[styles.navBtnTexte, ongletActif === 'INDICATEURS' && styles.navBtnTexteActif]}>📊 Indicateurs</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={[styles.navBtn, ongletActif === 'HISTORIQUE' && styles.navBtnActif]} onPress={() => setOngletActif('HISTORIQUE')}>
+          <Text style={[styles.navBtnTexte, ongletActif === 'HISTORIQUE' && styles.navBtnTexteActif]}>📋 Historique</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={[styles.navBtn, ongletActif === 'SIMULATION' && styles.navBtnActif]} onPress={() => setOngletActif('SIMULATION')}>
+          <Text style={[styles.navBtnTexte, ongletActif === 'SIMULATION' && styles.navBtnTexteActif]}>🧮 Simulation</Text>
+        </TouchableOpacity>
+      </View>
+
+      {loading ? (
+        <Text style={styles.loadingText}>Chargement de vos finances...</Text>
+      ) : (
+        <>
+          {ongletActif === 'INDICATEURS' && (
+            <Indicateurs comptes={comptes} transactions={transactions} />
+          )}
+          
+          {ongletActif === 'HISTORIQUE' && (
+             <Historique 
+               transactions={transactions} 
+               comptes={comptes} 
+               categories={categories} 
+               sousCategories={sousCategories}
+               onEdit={handleEditTransaction}
+               onDelete={handleDeleteTransaction}
+             />
+          )}
+
+          {ongletActif === 'SIMULATION' && (
+             <View style={styles.placeholderBox}>
+               <Text style={styles.sectionTitle}>Simulateurs</Text>
+               <Text style={styles.placeholderText}>(Les simulateurs de Crédit, Épargne et Projection arriveront ici)</Text>
+             </View>
+          )}
+        </>
+      )}
+
+    </ScrollView>
   );
 }
 
-// ── Composant KPI ────────────────────────────────────────────────────────────
-function KpiCard({
-  label,
-  valeur,
-  couleur,
-}: {
-  label: string;
-  valeur: string;
-  couleur?: string;
-}) {
-  return (
-    <ThemedView type="backgroundElement" style={styles.kpiCard}>
-      <ThemedText type="small" style={styles.kpiLabel}>
-        {label}
-      </ThemedText>
-      <ThemedText
-        type="defaultSemiBold"
-        style={[styles.kpiValeur, couleur ? { color: couleur } : {}]}
-      >
-        {valeur}
-      </ThemedText>
-    </ThemedView>
-  );
-}
-
-// ── Écran principal ──────────────────────────────────────────────────────────
-export default function HomeScreen() {
-  return (
-    <ThemedView style={styles.container}>
-      <SafeAreaView style={{ flex: 1, width: "100%" }}>
-        <ScrollView
-          contentContainerStyle={styles.scroll}
-          showsVerticalScrollIndicator={false}
-        >
-          {/* En-tête */}
-          <View style={styles.header}>
-            <View>
-              <ThemedText type="small" style={styles.sousTitre}>
-                Mon Budget
-              </ThemedText>
-              <ThemedText type="title">Tableau de bord</ThemedText>
-              <ThemedText type="small" style={styles.periode}>
-                Données au {MOIS_COURANT}
-              </ThemedText>
-            </View>
-          </View>
-
-          {/* Solde total */}
-          <ThemedView type="backgroundElement" style={styles.soldeTotalBloc}>
-            <ThemedText type="small" style={styles.kpiLabel}>
-              SOLDE TOTAL
-            </ThemedText>
-            <ThemedText
-              type="title"
-              style={{ color: SOLDE_TOTAL >= 0 ? "#10b981" : "#ef4444" }}
-            >
-              {SOLDE_TOTAL.toLocaleString("fr-FR", {
-                minimumFractionDigits: 2,
-              })}{" "}
-              €
-            </ThemedText>
-          </ThemedView>
-
-          {/* KPIs du mois */}
-          <ThemedText type="defaultSemiBold" style={styles.sectionTitre}>
-            Ce mois-ci
-          </ThemedText>
-          <View style={styles.kpiGrille}>
-            <KpiCard label="REVENUS" valeur="0,00 €" couleur="#10b981" />
-            <KpiCard label="DÉPENSES" valeur="0,00 €" couleur="#ef4444" />
-            <KpiCard label="ÉPARGNE" valeur="0,00 €" couleur="#2563eb" />
-            <KpiCard label="TAUX" valeur="0,0 %" />
-          </View>
-
-          {/* Soldes par compte */}
-          <ThemedText type="defaultSemiBold" style={styles.sectionTitre}>
-            Comptes
-          </ThemedText>
-          <View style={styles.comptesGrille}>
-            {COMPTES.map((c) => (
-              <CarteCompte key={c.nom} {...c} />
-            ))}
-          </View>
-
-          {/* Bouton nouvelle transaction */}
-          <TouchableOpacity style={styles.btnTransaction} activeOpacity={0.8}>
-            <ThemedText type="defaultSemiBold" style={styles.btnTexte}>
-              + Nouvelle transaction
-            </ThemedText>
-          </TouchableOpacity>
-        </ScrollView>
-      </SafeAreaView>
-    </ThemedView>
-  );
-}
-
-// ── Styles ───────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
-  container: { flex: 1 },
-  scroll: { padding: Spacing.four, gap: Spacing.three, paddingBottom: 40 },
-  header: { marginBottom: Spacing.two },
-  sousTitre: { opacity: 0.6, marginBottom: 2 },
-  periode: { opacity: 0.5, marginTop: 4 },
-  soldeTotalBloc: {
-    borderRadius: 16,
-    padding: Spacing.four,
-    alignItems: "center",
-    gap: 6,
-  },
-  sectionTitre: {
-    marginTop: Spacing.two,
-    marginBottom: Spacing.two,
-    opacity: 0.7,
-  },
-  kpiGrille: { flexDirection: "row", flexWrap: "wrap", gap: Spacing.two },
-  kpiCard: {
-    borderRadius: 12,
-    padding: Spacing.three,
-    flex: 1,
-    minWidth: "45%",
-    gap: 4,
-  },
-  kpiLabel: { opacity: 0.6, fontSize: 10, letterSpacing: 0.5 },
-  kpiValeur: { fontSize: 18, fontWeight: "700" },
-  comptesGrille: { gap: Spacing.two },
-  carteCompte: {
-    borderRadius: 12,
-    padding: Spacing.three,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  compteType: { opacity: 0.5, fontSize: 10 },
-  soldeMontant: { fontSize: 16, fontWeight: "700" },
-  btnTransaction: {
-    backgroundColor: "#b45309",
-    borderRadius: 12,
-    padding: Spacing.three,
-    alignItems: "center",
-    marginTop: Spacing.three,
-  },
-  btnTexte: { color: "white", fontSize: 15 },
+  container: { flex: 1, backgroundColor: '#0f1115' },
+  scrollContent: { padding: 20 },
+  header: { marginBottom: 24 },
+  pageTitle: { color: '#e8edf4', fontSize: 24, fontWeight: 'bold' },
+  indication: { color: '#8a93a3', fontSize: 13, marginTop: 4, fontStyle: 'italic' },
+  
+  navPrincipale: { flexDirection: 'row', borderBottomWidth: 2, borderBottomColor: '#262b36', marginBottom: 24, gap: 10 },
+  navBtn: { paddingVertical: 10, paddingHorizontal: 20, borderBottomWidth: 3, borderBottomColor: 'transparent', marginBottom: -2 },
+  navBtnActif: { borderBottomColor: '#c08a2d' },
+  navBtnTexte: { color: '#8a93a3', fontSize: 14, fontWeight: '500' },
+  navBtnTexteActif: { color: '#c08a2d', fontWeight: 'bold' },
+  
+  loadingText: { color: '#8a93a3', textAlign: 'center', marginTop: 40 },
+  
+  placeholderBox: { backgroundColor: '#171a21', padding: 40, borderRadius: 12, borderWidth: 1, borderColor: '#262b36', alignItems: 'center' },
+  sectionTitle: { color: '#e8edf4', fontSize: 16, fontWeight: 'bold', marginBottom: 10 },
+  placeholderText: { color: '#8a93a3', fontStyle: 'italic', textAlign: 'center' }
 });

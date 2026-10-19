@@ -1,277 +1,266 @@
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, FlatList, useWindowDimensions, TextInput } from 'react-native';
+import React, { useState, useEffect, useMemo } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, useWindowDimensions, ScrollView, Alert } from 'react-native';
+import { supabase } from '@/lib/supabase';
+
+import { NouvelleTransactionForm, TransactionsRecentesTable, TypeTx } from '@/components/transactions/nouvelle-transaction';
+import { PlanificationsFiltres, PlanificationsTable } from '@/components/transactions/planifications';
+
+// Générateur d'UUID v4 pour les groupes de transfert Supabase
+const generateUUID = () => {
+  let dt = new Date().getTime();
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    let r = (dt + Math.random()*16)%16 | 0;
+    dt = Math.floor(dt/16);
+    return (c === 'x' ? r : (r&0x3|0x8)).toString(16);
+  });
+};
 
 export default function TransactionsScreen() {
   const { width } = useWindowDimensions();
-  const isDesktop = width > 800; // Point de bascule pour l'affichage côte à côte
+  const isDesktop = width > 900;
 
-  // État pour basculer entre la nouvelle transaction et les planifications
+  const [comptes, setComptes] = useState<any[]>([]);
+  const [categories, setCategories] = useState<any[]>([]);
+  const [sousCategories, setSousCategories] = useState<any[]>([]);
+  const [transactions, setTransactions] = useState<any[]>([]);
+
   const [modeSaisie, setModeSaisie] = useState<'NOUVELLE' | 'PLANIFIEE'>('NOUVELLE');
-  const [recherche, setRecherche] = useState('');
+  const [typeTx, setTypeTx] = useState<TypeTx>('DEPENSE');
+  
+  const [filtresRecents, setFiltresRecents] = useState({ compteId: '', categorieId: '', sousCategorieId: '', libelle: '' });
+  const [filtresPlanif, setFiltresPlanif] = useState({ type: '' as TypeTx | '', dateDebut: '', dateFin: '', compte: '', categorie: '', sousCategorie: '', libelle: '' });
 
-  // Données fictives pour la structure (seront remplacées par Supabase)
-  const soldesMocks = [
-    { id: '1', nom: 'Boursorama', actuel: 1250.00, previsionnel: 850.00 },
-    { id: '2', nom: 'Livret A', actuel: 5000.00, previsionnel: 5200.00 },
-  ];
+  useEffect(() => { chargerDonnees(); }, []);
 
-  const transactionsRecentesMocks = [
-    { id: '1', libelle: 'Courses', montant: -45.50, date: '2026-10-18' },
-    { id: '2', libelle: 'Salaire', montant: 2500.00, date: '2026-10-15' },
-  ];
+  async function chargerDonnees() {
+    try {
+      const [resComptes, resCategories, resSousCat, resTransactions] = await Promise.all([
+        supabase.from('comptes').select('*').eq('actif', true).order('nom'),
+        supabase.from('categories').select('*').order('nom'),
+        supabase.from('sous_categories').select('*').order('nom'),
+        supabase.from('transactions').select('*').order('date_operation', { ascending: false })
+      ]);
+      if (resComptes.data) setComptes(resComptes.data);
+      if (resCategories.data) setCategories(resCategories.data);
+      if (resSousCat.data) setSousCategories(resSousCat.data);
+      if (resTransactions.data) setTransactions(resTransactions.data);
+    } catch (error) {
+      Alert.alert('Erreur', 'Impossible de charger les données.');
+    }
+  }
 
-  const planificationsMocks = [
-    { id: '1', libelle: 'Loyer', montant: -800.00, datePrevue: '2026-11-01' },
-    { id: '2', libelle: 'Abonnement Internet', montant: -39.99, datePrevue: '2026-10-25' },
-  ];
+  // --- CALCUL DES SOLDES RÉELS ---
+  const etatsComptes = useMemo(() => {
+    return comptes.map(c => {
+      let soldeActuel = 0;
+      transactions.forEach(tx => {
+        if (tx.compte_id === c.id) {
+          soldeActuel += (tx.sens === 'ENTREE' ? Number(tx.montant) : -Number(tx.montant));
+        }
+      });
+      return { ...c, actuel: soldeActuel, previsionnel: soldeActuel };
+    });
+  }, [comptes, transactions]);
 
-  // Sélection des données du tableau selon le mode
-  const donneesTableau = modeSaisie === 'NOUVELLE' ? transactionsRecentesMocks : planificationsMocks;
+  // --- ENREGISTREMENT AVEC CONTRÔLE DE DÉCOUVERT ---
+  const handleSaveTransaction = async (data: any) => {
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
 
-  return (
-    <View style={[styles.container, isDesktop && styles.containerDesktop]}>
-      
-      {/* ==========================================
-          COLONNE GAUCHE : ZONE DE SAISIE
-          ========================================== */}
-      <View style={[styles.leftColumn, isDesktop && { flex: 1 }]}>
+      const montantSaisi = Math.abs(Number(data.montant));
+      if (!montantSaisi || isNaN(montantSaisi)) {
+        return Alert.alert('Erreur', 'Le montant est invalide.');
+      }
+
+      // VÉRIFICATION DÉCOUVERT
+      if (data.typeTx === 'DEPENSE' || data.typeTx === 'TRANSFERT') {
+        const compteIdConcerne = data.typeTx === 'TRANSFERT' ? data.compteSourceId : data.compteId;
+        const compteInfo = etatsComptes.find(c => c.id === compteIdConcerne);
+        if (compteInfo && compteInfo.decouvert_autorise === false) {
+          if ((compteInfo.actuel - montantSaisi) < 0) {
+            return Alert.alert('Refusé', `Le solde du compte "${compteInfo.nom}" ne permet pas ce découvert.`);
+          }
+        }
+      }
+
+      if (data.typeTx === 'TRANSFERT') {
+        if (!data.compteSourceId || !data.compteCibleId) return Alert.alert('Erreur', 'Sélectionnez les deux comptes.');
         
-        {/* Navigation interne (Onglets) */}
-        <View style={styles.tabContainer}>
-          <TouchableOpacity 
-            style={[styles.tab, modeSaisie === 'NOUVELLE' && styles.tabActive]}
-            onPress={() => setModeSaisie('NOUVELLE')}
-          >
-            <Text style={[styles.tabText, modeSaisie === 'NOUVELLE' && styles.tabTextActive]}>
-              Nouvelle Transaction
-            </Text>
-          </TouchableOpacity>
-          <TouchableOpacity 
-            style={[styles.tab, modeSaisie === 'PLANIFIEE' && styles.tabActive]}
-            onPress={() => setModeSaisie('PLANIFIEE')}
-          >
-            <Text style={[styles.tabText, modeSaisie === 'PLANIFIEE' && styles.tabTextActive]}>
-              Planifier
-            </Text>
-          </TouchableOpacity>
-        </View>
+        const groupeId = generateUUID(); // Format UUID valide exigé par Supabase
 
-        {/* Zone de formulaire */}
-        <View style={styles.formCard}>
-          <Text style={styles.sectionTitle}>
-            {modeSaisie === 'NOUVELLE' ? 'Saisir une opération' : 'Créer une planification'}
-          </Text>
-          <Text style={styles.placeholderText}>
-            (Le formulaire viendra ici à la prochaine étape)
-          </Text>
-        </View>
+        const { error } = await supabase.from('transactions').insert([
+          { user_id: user.id, type_operation: 'TRANSFERT', sens: 'SORTIE', montant: montantSaisi, compte_id: data.compteSourceId, groupe_id: groupeId, date_operation: data.date, libelle: data.libelle, note: data.note },
+          { user_id: user.id, type_operation: 'TRANSFERT', sens: 'ENTREE', montant: montantSaisi, compte_id: data.compteCibleId, groupe_id: groupeId, date_operation: data.date, libelle: data.libelle, note: data.note }
+        ]);
+        if (error) throw error;
+      } else {
+        if (!data.compteId) return Alert.alert('Erreur', 'Sélectionnez un compte.');
+        const { error } = await supabase.from('transactions').insert([{
+          user_id: user.id,
+          type_operation: data.typeTx,
+          sens: data.typeTx === 'REVENU' ? 'ENTREE' : 'SORTIE',
+          montant: montantSaisi,
+          compte_id: data.compteId,
+          categorie_id: data.categorieId || null,
+          sous_categorie_id: data.sousCategorieId || null,
+          date_operation: data.date,
+          libelle: data.libelle,
+          note: data.note
+        }]);
+        if (error) throw error;
+      }
+
+      Alert.alert('Succès', 'Transaction enregistrée !');
+      chargerDonnees();
+    } catch (err: any) {
+      Alert.alert('Erreur serveur', err.message);
+    }
+  };
+
+  const comptesCourants = etatsComptes.filter(c => c.type !== 'EPARGNE');
+  const comptesEpargne = etatsComptes.filter(c => c.type === 'EPARGNE');
+  const totauxComptes = etatsComptes.reduce((acc, c) => {
+    if (c.type === 'EPARGNE') acc.epargne.actuel += c.actuel;
+    else acc.courant.actuel += c.actuel;
+    return acc;
+  }, { courant: { actuel: 0 }, epargne: { actuel: 0 } });
+
+  const donneesTableau = useMemo(() => {
+    if (modeSaisie === 'NOUVELLE') {
+      const txEnrichies = transactions.map(tx => ({
+        ...tx,
+        nomCompte: comptes.find(c => c.id === tx.compte_id)?.nom || '',
+        nomCategorie: categories.find(c => c.id === tx.categorie_id)?.nom || '',
+      }));
+
+      return txEnrichies.filter(tx => 
+        (filtresRecents.libelle === '' || (tx.libelle && tx.libelle.toLowerCase().includes(filtresRecents.libelle.toLowerCase()))) &&
+        (filtresRecents.compteId === '' || tx.compte_id === filtresRecents.compteId) &&
+        (filtresRecents.categorieId === '' || tx.categorie_id === filtresRecents.categorieId) &&
+        (filtresRecents.sousCategorieId === '' || tx.sous_categorie_id === filtresRecents.sousCategorieId)
+      ).slice(0, 15);
+    } else {
+      return []; // Mocks des planifications vides
+    }
+  }, [modeSaisie, transactions, filtresRecents, comptes, categories]);
+
+  const getFormBackground = () => {
+    const activeType = modeSaisie === 'NOUVELLE' ? typeTx : filtresPlanif.type;
+    if (activeType === 'DEPENSE') return '#2a1a1c';
+    if (activeType === 'REVENU') return '#1a261e';
+    if (activeType === 'TRANSFERT') return '#1a202c';
+    return '#171a21';
+  };
+
+  const LeftColumn = () => (
+    <View style={[styles.leftColumn, isDesktop && { flex: 1 }]}>
+      <View style={styles.tabContainer}>
+        <TouchableOpacity style={[styles.tab, modeSaisie === 'NOUVELLE' && styles.tabActive]} onPress={() => setModeSaisie('NOUVELLE')}>
+          <Text style={[styles.tabText, modeSaisie === 'NOUVELLE' && styles.tabTextActive]}>Nouvelle Transaction</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={[styles.tab, modeSaisie === 'PLANIFIEE' && styles.tabActive]} onPress={() => setModeSaisie('PLANIFIEE')}>
+          <Text style={[styles.tabText, modeSaisie === 'PLANIFIEE' && styles.tabTextActive]}>Transactions planifiées</Text>
+        </TouchableOpacity>
       </View>
 
-
-      {/* ==========================================
-          COLONNE DROITE : SOLDES ET LISTES
-          ========================================== */}
-      <View style={[styles.rightColumn, isDesktop && { flex: 1.5 }]}>
-        
-        {/* En-tête des Soldes */}
-        <View style={styles.card}>
-          <View style={styles.balanceHeader}>
-            <Text style={styles.sectionTitle}>État des comptes</Text>
-            <Text style={styles.projectionDate}>Proj. ciblée : Fin du mois</Text>
-          </View>
-          
-          {soldesMocks.map(solde => (
-            <View key={solde.id} style={styles.balanceRow}>
-              <Text style={styles.accountName}>{solde.nom}</Text>
-              <View style={styles.balanceValues}>
-                <Text style={styles.currentBalance}>{solde.actuel.toFixed(2)} €</Text>
-                <Text style={styles.projectedBalance}>→ {solde.previsionnel.toFixed(2)} €</Text>
-              </View>
-            </View>
-          ))}
-        </View>
-
-        {/* Tableau contextuel */}
-        <View style={[styles.card, { flex: 1 }]}>
-          <View style={styles.tableHeader}>
-            <Text style={styles.sectionTitle}>
-              {modeSaisie === 'NOUVELLE' ? '10 Dernières Transactions' : 'À venir (Non soldé)'}
-            </Text>
-            <TextInput 
-              style={styles.searchInput} 
-              placeholder="Filtrer..." 
-              placeholderTextColor="#8a93a3"
-              value={recherche}
-              onChangeText={setRecherche}
-            />
-          </View>
-
-          <FlatList
-            data={donneesTableau}
-            keyExtractor={item => item.id}
-            renderItem={({ item }) => (
-              <View style={styles.transactionRow}>
-                <Text style={styles.txDate}>{'date' in item ? item.date : item.datePrevue}</Text>
-                <Text style={styles.txLibelle}>{item.libelle}</Text>
-                <Text style={[styles.txMontant, item.montant < 0 ? styles.txNegative : styles.txPositive]}>
-                  {item.montant > 0 ? '+' : ''}{item.montant.toFixed(2)} €
-                </Text>
-              </View>
-            )}
-            ListEmptyComponent={<Text style={styles.placeholderText}>Aucune donnée.</Text>}
-          />
-        </View>
-
+      <View style={[styles.formCard, { backgroundColor: getFormBackground() }]}>
+        <Text style={styles.sectionTitle}>{modeSaisie === 'NOUVELLE' ? 'Saisir une opération' : 'Filtres de planification'}</Text>
+        {modeSaisie === 'NOUVELLE' ? (
+          <NouvelleTransactionForm typeTx={typeTx} setTypeTx={setTypeTx} comptes={comptes} categories={categories} sousCategories={sousCategories} onSave={handleSaveTransaction} />
+        ) : (
+          <PlanificationsFiltres filtres={filtresPlanif} setFiltres={setFiltresPlanif} comptes={comptes} categories={categories} sousCategories={sousCategories} />
+        )}
       </View>
     </View>
+  );
+
+  const RightColumn = () => (
+    <View style={[styles.rightColumn, isDesktop && { flex: 1.8 }]}>
+      <View style={styles.card}>
+        <View style={styles.balanceHeader}>
+          <Text style={styles.sectionTitle}>État des comptes</Text>
+        </View>
+        <View style={isDesktop ? styles.threeColumnsContainer : styles.mobileScrollContent}>
+          <View style={isDesktop && styles.balanceCol}>
+            <Text style={styles.colTitle}>Comptes Courants</Text>
+            {comptesCourants.map(solde => (
+              <View key={solde.id} style={styles.compactBalanceRow}>
+                <Text style={styles.accountName} numberOfLines={1}>{solde.nom}</Text>
+                <View style={styles.balanceValues}><Text style={[styles.currentBalance, solde.actuel < 0 && {color: '#ef4444'}]}>{solde.actuel.toFixed(2)} €</Text></View>
+              </View>
+            ))}
+          </View>
+          <View style={[isDesktop && styles.balanceCol, isDesktop && styles.middleCol]}>
+            <Text style={styles.colTitle}>Épargne</Text>
+            {comptesEpargne.map(solde => (
+              <View key={solde.id} style={styles.compactBalanceRow}>
+                <Text style={styles.accountName} numberOfLines={1}>{solde.nom}</Text>
+                <View style={styles.balanceValues}><Text style={styles.currentBalance}>{solde.actuel.toFixed(2)} €</Text></View>
+              </View>
+            ))}
+          </View>
+          <View style={isDesktop && styles.balanceCol}>
+             <Text style={styles.colTitle}>Totaux</Text>
+             <View style={styles.compactBalanceRow}>
+                <Text style={styles.summaryLabel}>Courants</Text>
+                <View style={styles.balanceValues}><Text style={[styles.summaryCurrent, totauxComptes.courant.actuel < 0 && {color: '#ef4444'}]}>{totauxComptes.courant.actuel.toFixed(2)} €</Text></View>
+              </View>
+              <View style={styles.compactBalanceRow}>
+                <Text style={styles.summaryLabel}>Épargne</Text>
+                <View style={styles.balanceValues}><Text style={styles.summaryCurrent}>{totauxComptes.epargne.actuel.toFixed(2)} €</Text></View>
+              </View>
+          </View>
+        </View>
+      </View>
+
+      <View style={[styles.card, { flex: 1 }]}>
+        {modeSaisie === 'NOUVELLE' ? (
+          <TransactionsRecentesTable donnees={donneesTableau} filtres={filtresRecents} setFiltres={setFiltresRecents} comptes={comptes} categories={categories} sousCategories={sousCategories} />
+        ) : (
+          <PlanificationsTable donnees={donneesTableau} comptes={comptes} categories={categories} sousCategories={sousCategories} />
+        )}
+      </View>
+    </View>
+  );
+
+  return (
+    <>
+      {!isDesktop ? (
+        <ScrollView style={styles.container} contentContainerStyle={styles.mobileScrollContent}>
+          <LeftColumn /><View style={styles.mobileDivider} /><RightColumn />
+        </ScrollView>
+      ) : (
+        <View style={[styles.container, styles.containerDesktop]}><LeftColumn /><RightColumn /></View>
+      )}
+    </>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#0f1115',
-    padding: 15,
-    gap: 20,
-  },
-  containerDesktop: {
-    flexDirection: 'row',
-  },
-  leftColumn: {
-    gap: 15,
-  },
-  rightColumn: {
-    gap: 15,
-  },
-  tabContainer: {
-    flexDirection: 'row',
-    backgroundColor: '#171a21',
-    borderRadius: 8,
-    padding: 4,
-    borderWidth: 1,
-    borderColor: '#262b36',
-  },
-  tab: {
-    flex: 1,
-    paddingVertical: 10,
-    alignItems: 'center',
-    borderRadius: 6,
-  },
-  tabActive: {
-    backgroundColor: '#262b36',
-  },
-  tabText: {
-    color: '#8a93a3',
-    fontWeight: '600',
-  },
-  tabTextActive: {
-    color: '#e8edf4',
-  },
-  card: {
-    backgroundColor: '#171a21',
-    borderRadius: 12,
-    padding: 20,
-    borderWidth: 1,
-    borderColor: '#262b36',
-  },
-  formCard: {
-    backgroundColor: '#171a21',
-    borderRadius: 12,
-    padding: 20,
-    borderWidth: 1,
-    borderColor: '#262b36',
-    minHeight: 400,
-    justifyContent: 'center',
-  },
-  sectionTitle: {
-    color: '#e8edf4',
-    fontSize: 18,
-    fontWeight: 'bold',
-    marginBottom: 15,
-  },
-  placeholderText: {
-    color: '#8a93a3',
-    textAlign: 'center',
-    fontStyle: 'italic',
-  },
-  balanceHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  projectionDate: {
-    color: '#c08a2d',
-    fontSize: 12,
-    fontWeight: 'bold',
-    marginBottom: 15,
-  },
-  balanceRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: '#262b36',
-  },
-  accountName: {
-    color: '#e8edf4',
-    fontSize: 16,
-  },
-  balanceValues: {
-    alignItems: 'flex-end',
-  },
-  currentBalance: {
-    color: '#e8edf4',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  projectedBalance: {
-    color: '#8a93a3',
-    fontSize: 12,
-    marginTop: 2,
-  },
-  tableHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 15,
-  },
-  searchInput: {
-    backgroundColor: '#0f1115',
-    color: '#e8edf4',
-    paddingHorizontal: 15,
-    paddingVertical: 8,
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: '#262b36',
-    width: 150,
-  },
-  transactionRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#262b36',
-  },
-  txDate: {
-    color: '#8a93a3',
-    fontSize: 12,
-    width: 80,
-  },
-  txLibelle: {
-    color: '#e8edf4',
-    flex: 1,
-    fontSize: 14,
-  },
-  txMontant: {
-    fontWeight: 'bold',
-    fontSize: 14,
-  },
-  txPositive: {
-    color: '#10b981',
-  },
-  txNegative: {
-    color: '#e8edf4',
-  },
+  container: { flex: 1, backgroundColor: '#0f1115', padding: 15, paddingTop: 5 },
+  containerDesktop: { flexDirection: 'row', gap: 20 },
+  mobileScrollContent: { gap: 20, paddingBottom: 30 },
+  mobileDivider: { height: 1, backgroundColor: '#262b36', marginVertical: 10 },
+  leftColumn: { gap: 10 },
+  rightColumn: { gap: 15 },
+  tabContainer: { flexDirection: 'row', backgroundColor: '#171a21', borderRadius: 8, padding: 4, borderWidth: 1, borderColor: '#262b36' },
+  tab: { flex: 1, paddingVertical: 8, alignItems: 'center', borderRadius: 6 },
+  tabActive: { backgroundColor: '#262b36' },
+  tabText: { color: '#8a93a3', fontWeight: '600', fontSize: 12 },
+  tabTextActive: { color: '#e8edf4' },
+  card: { backgroundColor: '#171a21', borderRadius: 12, padding: 15, borderWidth: 1, borderColor: '#262b36' },
+  formCard: { borderRadius: 12, padding: 15, borderWidth: 1, borderColor: '#262b36', flex: 1 },
+  sectionTitle: { color: '#e8edf4', fontSize: 15, fontWeight: 'bold', marginBottom: 12 },
+  balanceHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 },
+  threeColumnsContainer: { flexDirection: 'row', gap: 15 },
+  balanceCol: { flex: 1 },
+  middleCol: { borderLeftWidth: 1, borderRightWidth: 1, borderColor: '#262b36', paddingHorizontal: 15 },
+  colTitle: { color: '#8a93a3', fontSize: 10, fontWeight: 'bold', textTransform: 'uppercase', marginBottom: 8 },
+  compactBalanceRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 4, borderBottomWidth: 1, borderBottomColor: '#262b36' },
+  accountName: { color: '#e8edf4', fontSize: 12, fontWeight: '500', flex: 1, paddingRight: 5 },
+  balanceValues: { alignItems: 'flex-end', flexShrink: 0 },
+  currentBalance: { color: '#e8edf4', fontSize: 12, fontWeight: 'bold' },
+  summaryLabel: { color: '#c08a2d', fontSize: 11, fontWeight: 'bold', textTransform: 'uppercase', flex: 1 },
+  summaryCurrent: { color: '#c08a2d', fontSize: 13, fontWeight: 'bold' },
 });

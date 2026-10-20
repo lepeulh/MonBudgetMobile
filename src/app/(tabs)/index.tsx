@@ -3,6 +3,7 @@ import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert } from 'rea
 import { supabase } from '@/lib/supabase';
 import { Indicateurs } from '@/components/tableau_de_bord/indicateurs';
 import { Historique } from '@/components/tableau_de_bord/historique';
+import { Simulation } from '@/components/tableau_de_bord/simulation'; // NOUVEL IMPORT
 
 type OngletPrincipal = 'INDICATEURS' | 'HISTORIQUE' | 'SIMULATION';
 
@@ -127,13 +128,10 @@ export default function TableauDeBordScreen() {
           )}
 
           {ongletActif === 'SIMULATION' && (
-             <View style={styles.placeholderBox}>
-               <Text style={styles.sectionTitle}>Simulateurs</Text>
-               <Text style={styles.placeholderText}>(Les simulateurs de Crédit, Épargne et Projection arriveront ici)</Text>
-             </View>
+             <Simulation transactions={transactions} />
+              )}
+            </>
           )}
-        </>
-      )}
 
     </ScrollView>
   );

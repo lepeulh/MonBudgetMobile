@@ -1,0 +1,86 @@
+-- =====================================================================
+-- 001 — Une seule règle d'accès par table (isolation par utilisateur)
+-- =====================================================================
+-- Avant : 2 policies par table (« Isolation utilisateur » + « user_xxx »)
+-- Après : 1 policy par table, réservée aux utilisateurs CONNECTÉS,
+--         qui ne laisse voir et modifier que les lignes dont
+--         user_id = identifiant de l'utilisateur connecté.
+--
+-- Le tout est dans une transaction (begin ... commit) : si une erreur
+-- survient, rien n'est modifié.
+-- =====================================================================
+
+begin;
+
+-- 1) Supprime TOUTES les policies existantes sur ces 6 tables
+do $$
+declare
+  p record;
+begin
+  for p in
+    select policyname, tablename
+    from pg_policies
+    where schemaname = 'public'
+      and tablename in (
+        'categories',
+        'comptes',
+        'sous_categories',
+        'planifications',
+        'transactions',
+        'occurrences_planifiees'
+      )
+  loop
+    execute format('drop policy %I on public.%I', p.policyname, p.tablename);
+  end loop;
+end $$;
+
+-- 2) S'assure que la RLS est active (elle l'est déjà, par sécurité)
+alter table public.categories             enable row level security;
+alter table public.comptes                enable row level security;
+alter table public.sous_categories        enable row level security;
+alter table public.planifications         enable row level security;
+alter table public.transactions           enable row level security;
+alter table public.occurrences_planifiees enable row level security;
+
+-- 3) Recrée une règle unique par table
+--    USING      : quelles lignes je peux lire / modifier / supprimer
+--    WITH CHECK : quelles lignes je peux créer / enregistrer
+--    (select auth.uid()) est plus performant que auth.uid() seul.
+
+create policy "acces_proprietaire" on public.categories
+  for all to authenticated
+  using      ((select auth.uid()) = user_id)
+  with check ((select auth.uid()) = user_id);
+
+create policy "acces_proprietaire" on public.comptes
+  for all to authenticated
+  using      ((select auth.uid()) = user_id)
+  with check ((select auth.uid()) = user_id);
+
+create policy "acces_proprietaire" on public.sous_categories
+  for all to authenticated
+  using      ((select auth.uid()) = user_id)
+  with check ((select auth.uid()) = user_id);
+
+create policy "acces_proprietaire" on public.planifications
+  for all to authenticated
+  using      ((select auth.uid()) = user_id)
+  with check ((select auth.uid()) = user_id);
+
+create policy "acces_proprietaire" on public.transactions
+  for all to authenticated
+  using      ((select auth.uid()) = user_id)
+  with check ((select auth.uid()) = user_id);
+
+create policy "acces_proprietaire" on public.occurrences_planifiees
+  for all to authenticated
+  using      ((select auth.uid()) = user_id)
+  with check ((select auth.uid()) = user_id);
+
+commit;
+
+-- Vérification (à lancer après, séparément) :
+-- select tablename, policyname, cmd, roles, qual
+-- from pg_policies
+-- where schemaname = 'public'
+-- order by tablename;

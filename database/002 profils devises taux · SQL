@@ -1,0 +1,158 @@
+-- =====================================================================
+-- 002 — Devises, profils utilisateur et taux de change
+-- =====================================================================
+-- Trois tables :
+--   devises     : liste des devises prises en charge (commune à tous)
+--   profils     : paramètres de chaque utilisateur (devise, thème, ...)
+--   taux_change : taux du jour, remplis automatiquement (commune à tous)
+--
+-- Ce script peut être relancé sans danger (il ne duplique rien).
+-- =====================================================================
+
+
+-- ---------------------------------------------------------------------
+-- 1) DEVISES : le catalogue
+-- ---------------------------------------------------------------------
+create table if not exists public.devises (
+  code      text primary key check (code ~ '^[A-Z]{3}$'),  -- ex. EUR, XOF
+  nom       text not null,
+  symbole   text not null,
+  decimales smallint not null default 2 check (decimales between 0 and 4),
+  actif     boolean not null default true
+);
+
+alter table public.devises enable row level security;
+
+-- Tout utilisateur connecté peut LIRE le catalogue. Personne ne peut le
+-- modifier depuis l'app (seul toi, depuis le tableau de bord Supabase).
+drop policy if exists "devises_lecture" on public.devises;
+create policy "devises_lecture" on public.devises
+  for select to authenticated using (true);
+
+insert into public.devises (code, nom, symbole, decimales) values
+  ('EUR', 'Euro',                       '€',     2),
+  ('USD', 'Dollar américain',           '$',     2),
+  ('GBP', 'Livre sterling',             '£',     2),
+  ('CHF', 'Franc suisse',               'CHF',   2),
+  ('CAD', 'Dollar canadien',            '$ CA',  2),
+  ('XOF', 'Franc CFA (BCEAO)',          'F CFA', 0),
+  ('XAF', 'Franc CFA (BEAC)',           'F CFA', 0),
+  ('MAD', 'Dirham marocain',            'DH',    2),
+  ('TND', 'Dinar tunisien',             'DT',    3),
+  ('DZD', 'Dinar algérien',             'DA',    2),
+  ('NGN', 'Naira nigérian',             '₦',     2),
+  ('GHS', 'Cedi ghanéen',               'GH₵',   2)
+on conflict (code) do nothing;
+
+
+-- ---------------------------------------------------------------------
+-- 2) PROFILS : un par utilisateur, tous ses paramètres
+-- ---------------------------------------------------------------------
+create table if not exists public.profils (
+  user_id       uuid primary key references auth.users (id) on delete cascade,
+  devise_defaut text not null default 'EUR' references public.devises (code),
+  theme         text not null default 'systeme'
+                check (theme in ('clair', 'sombre', 'systeme')),
+  langue        text not null default 'fr',
+  -- Réservé aux réglages futurs : on pourra y ranger de nouvelles
+  -- préférences sans modifier la structure de la table.
+  parametres    jsonb not null default '{}'::jsonb,
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now()
+);
+
+alter table public.profils enable row level security;
+
+-- Chacun ne voit et ne modifie QUE son propre profil.
+-- (Pas de règle "delete" : le profil disparaît avec le compte.)
+drop policy if exists "profils_select" on public.profils;
+create policy "profils_select" on public.profils
+  for select to authenticated
+  using ((select auth.uid()) = user_id);
+
+drop policy if exists "profils_insert" on public.profils;
+create policy "profils_insert" on public.profils
+  for insert to authenticated
+  with check ((select auth.uid()) = user_id);
+
+drop policy if exists "profils_update" on public.profils;
+create policy "profils_update" on public.profils
+  for update to authenticated
+  using      ((select auth.uid()) = user_id)
+  with check ((select auth.uid()) = user_id);
+
+-- Met à jour "updated_at" automatiquement à chaque modification
+create or replace function public.maj_updated_at()
+returns trigger
+language plpgsql
+set search_path = ''
+as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$;
+
+drop trigger if exists profils_maj_updated_at on public.profils;
+create trigger profils_maj_updated_at
+  before update on public.profils
+  for each row execute function public.maj_updated_at();
+
+-- Crée automatiquement un profil à chaque nouvelle inscription
+create or replace function public.creer_profil_nouvel_utilisateur()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  insert into public.profils (user_id)
+  values (new.id)
+  on conflict (user_id) do nothing;
+  return new;
+end;
+$$;
+
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row execute function public.creer_profil_nouvel_utilisateur();
+
+-- Crée le profil des utilisateurs DÉJÀ inscrits (toi, tes comptes de test)
+insert into public.profils (user_id)
+select id from auth.users
+on conflict (user_id) do nothing;
+
+
+-- ---------------------------------------------------------------------
+-- 3) TAUX_CHANGE : un taux par devise et par jour, pour toute l'app
+-- ---------------------------------------------------------------------
+-- Convention : base EUR. La ligne (2026-10-24, USD, 1.08) signifie
+-- « le 24/10/2026, 1 EUR = 1.08 USD ».
+-- Pour convertir de A vers B :  montant / taux_A * taux_B  (EUR = 1).
+create table if not exists public.taux_change (
+  date_taux  date not null,
+  devise     text not null references public.devises (code),
+  taux       numeric(20, 8) not null check (taux > 0),
+  source     text,
+  created_at timestamptz not null default now(),
+  primary key (date_taux, devise)
+);
+
+create index if not exists taux_change_devise_date_idx
+  on public.taux_change (devise, date_taux desc);
+
+alter table public.taux_change enable row level security;
+
+-- Lecture pour tout utilisateur connecté. AUCUNE règle d'écriture :
+-- seul le robot quotidien (clé serveur, à venir) pourra remplir la table.
+drop policy if exists "taux_change_lecture" on public.taux_change;
+create policy "taux_change_lecture" on public.taux_change
+  for select to authenticated using (true);
+
+
+-- ---------------------------------------------------------------------
+-- Vérification (à lancer après, séparément) :
+-- select * from public.profils;      -- une ligne par utilisateur existant
+-- select * from public.devises;      -- 12 devises
+-- ---------------------------------------------------------------------
